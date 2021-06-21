@@ -137,9 +137,9 @@ class DeepSet_pc(nn.Module):
         self.ro = nn.Sequential(
             nn.Dropout(p=0.5),
             nn.Linear(self.d_dim, self.d_dim),
-            # nn.Tanh(),
-            # nn.Dropout(p=0.5),
-            # nn.Linear(self.d_dim, self.out_dim),
+            nn.Tanh(),
+            nn.Dropout(p=0.5),
+            nn.Linear(self.d_dim, self.out_dim),
             # nn.Linear(self.d_dim, self.d_dim),
         )
         # print(self)

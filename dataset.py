@@ -149,6 +149,7 @@ class Parametric(Dataset):
         label += 1
 
         # for i in range(100):
+        #     # m = torch.distributions.normal.Normal(torch.tensor([0.0]), torch.tensor([0.25]))
         #     m = torch.distributions.normal.Normal(torch.tensor([0.0]), torch.tensor([1.0]))
         #     x = m.sample([set_size])
         #     set_dist.append(x)
@@ -157,7 +158,8 @@ class Parametric(Dataset):
 
         # for i in range(100):
         #     mix = torch.distributions.Categorical(torch.ones(2,))
-        #     comp = torch.distributions.Normal(torch.tensor([-1.0, 1.0]), torch.tensor([0.25, 0.25]))
+        #     # comp = torch.distributions.Normal(torch.tensor([-0.3, 0.3]), torch.tensor([0.15, 0.15]))
+        #     comp = torch.distributions.Normal(torch.tensor([-2.0, 2.0]), torch.tensor([1.0, 1.0]))
         #     gmm = torch.distributions.MixtureSameFamily(mix, comp)
         #     x = gmm.sample([set_size])
         #     set_dist.append(x.unsqueeze(1))
@@ -179,11 +181,11 @@ class Parametric(Dataset):
         # label += 1
 
         # plt.figure()
-        # plt.subplot(211)
+        # # plt.subplot(211)
         # plt.hist(set_dist[99].cpu().numpy(), bins=50)
-        # plt.subplot(212)
+        # # plt.subplot(212)
         # plt.hist(set_dist[100].detach().cpu().numpy(), bins=50)
-        # plt.savefig("barycenters/real.png")
+        # plt.savefig("gen_param/real.png")
 
         self.data = torch.stack(set_dist).float()
         self.targets = torch.stack(targets)

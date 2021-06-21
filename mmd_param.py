@@ -24,6 +24,7 @@ from geomloss import SamplesLoss
 from scipy.stats import pearsonr
 import ot
 import time
+from MMD import mix_rbf_mmd2
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs of training")
@@ -102,45 +103,6 @@ class Generator(nn.Module):
         return img
 
 
-class Discriminator(nn.Module):
-    def __init__(self):
-        super(Discriminator, self).__init__()
-
-        self.label_embedding = nn.Embedding(opt.n_classes, opt.n_classes)
-
-        self.model = nn.Sequential(
-            nn.Linear(opt.enc_dim + int(np.prod(img_shape)), 512),
-            # nn.Linear(int(np.prod(img_shape)), 512),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(512, 512),
-            nn.Dropout(0.4),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(512, 512),
-            nn.Dropout(0.4),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(512, 1),
-        )
-
-    def forward(self, img, labels=None):
-        # Concatenate label embedding and image to produce input
-        # d_in = torch.cat((img.view(img.size(0), -1), self.label_embedding(labels)), -1)
-        # if labels.size(1) == 1:
-        #     one_hot = torch.cuda.FloatTensor(labels.size(0), opt.enc_dim)
-        #     labels = one_hot.scatter_(1, labels.data, 1)
-        #     labels = labels.unsqueeze(1).expand(-1, int(img.size(0) / labels.size(0)), -1).reshape(img.size(0), -1)
-        #     # labels.squeeze(1)
-        #     # labels = self.label_embedding(labels)
-        #     # labels = labels.expand(-1, int(img.size(0) / labels.size(0)), -1).reshape(img.size(0), -1)
-        # else:
-        #     # labels = torch.cat(int(img.size(0) / labels.size(0)) * [labels])
-        #     labels = labels.unsqueeze(1).expand(-1, int(img.size(0) / labels.size(0)), -1).reshape(img.size(0), -1)
-        labels = labels.unsqueeze(1).expand(-1, int(img.size(0) / labels.size(0)), -1).reshape(img.size(0), -1)
-        d_in = torch.cat((img.view(img.size(0), -1), labels), -1)
-        # d_in = img.view(img.size(0), -1)
-        validity = self.model(d_in)
-        return validity
-
-
 # Loss functions
 adversarial_loss = torch.nn.MSELoss()
 
@@ -151,13 +113,10 @@ encoder1 = InvariantModel(phi=phi, rho=rho, set_size=opt.set_size, img_shape=img
 
 # Initialize generator and discriminator
 generator = Generator()
-discriminator = Discriminator()
 
 if cuda:
     encoder1.cuda()
-    # encoder2.cuda()
     generator.cuda()
-    discriminator.cuda()
     adversarial_loss.cuda()
 
 # # Configure data loader
@@ -179,13 +138,12 @@ if cuda:
 # train_db = MNISTSummation(set_size=opt.set_size, train=True, transform=transforms.Compose([transforms.Resize(opt.img_size), transforms.ToTensor(),
                                                                                            # transforms.Normalize([0.5], [0.5])]))
 train_db = Parametric(set_size=opt.set_size)
-dataloader = torch.utils.data.DataLoader(train_db, batch_size=opt.batch_size, shuffle=True, drop_last=True)
+dataloader = torch.utils.data.DataLoader(train_db, batch_size=opt.batch_size, shuffle=True)
 
 # Optimizers
 optimizer_E1 = torch.optim.Adam(encoder1.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
 # optimizer_E2 = torch.optim.Adam(encoder2.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
 optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
-optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
 
 FloatTensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 LongTensor = torch.cuda.LongTensor if cuda else torch.LongTensor
@@ -194,7 +152,7 @@ LongTensor = torch.cuda.LongTensor if cuda else torch.LongTensor
 sinkhorn1 = SamplesLoss(loss="sinkhorn", scaling=0.9, p=1, debias=False)
 # sinkhorn2 = SamplesLoss(loss="sinkhorn", scaling=0.9, p=2, debias=False)
 tsne = TSNE(n_components=2, random_state=0)
-
+sigma_list = np.logspace(-3, 2, 10)
 
 # def sample_image(n_row, batches_done):
 #     """Saves a grid of generated digits ranging from 0 to n_classes"""
@@ -218,6 +176,9 @@ dif2 = []
 total = 0
 total_time = []
 for epoch in range(opt.n_epochs):
+    sink1 = []
+    euc = []
+
     encoder1.train()
     # generator.train()
     real_imgs = None
@@ -254,6 +215,7 @@ for epoch in range(opt.n_epochs):
         # Sample noise and labels as generator input
         z = Variable(FloatTensor(np.random.normal(0, 1, (batch_size * set_size, opt.latent_dim))))
         # gen_labels = Variable(LongTensor(np.random.randint(0, opt.n_classes, batch_size)))
+        # encodings_prv = encodings
         if real_imgs_prv is not None:
             encodings_prv = encoder1(real_imgs_prv)
         else:
@@ -261,10 +223,10 @@ for epoch in range(opt.n_epochs):
         encodings = encoder1(real_imgs)
         # encodings.retain_grad()
 
-        # Generate a batch of images 
+        # Generate a batch of images
         # gen_imgs = generator(z, gen_labels)
         if encodings_prv is not None:
-            gen_imgs_prv = generator(z, encodings_prv)
+            gen_imgs_prv = generator(z, encodings_prv[:batch_size])
         else:
             gen_imgs_prv = gen_imgs
         # gen_imgs = generator(z, labels)
@@ -297,84 +259,34 @@ for epoch in range(opt.n_epochs):
         enc_dist = torch.norm(src_enc - dest_enc, p=2, dim=1)
         loss_2 = adversarial_loss(enc_dist, gen_dist)
 
-        # for s, d in zip(src, dest):
-        # tmp_imgs = gen_imgs.reshape(gen_imgs.shape[0], -1)
-        # for i in range(tmp_imgs.shape[0]):
-        #     for j in range(tmp_imgs.shape[1]):
-        #         grd1 = torch.autograd.grad(tmp_imgs[i, j], encodings, create_graph=True)[0][int(i / batch_size)]
-        #         for k in range(grd1.shape[0]):
-        #             grd2 = torch.autograd.grad(grd1[k], encodings, retain_graph=True)[0][int(i / batch_size)]
-        #             # ot_loss += sum([gr2.norm()**2 for gr2 in grd2])
-        #             ot_loss += torch.norm(grd2)**2
-
-        # Loss measures generator's ability to fool the discriminator
-        # validity = discriminator(gen_imgs)
-        # validity = discriminator(gen_imgs, gen_labels)
-        # validity = discriminator(gen_imgs, labels)
-        validity = discriminator(gen_imgs, encodings.detach())
-
-        g_loss_1 = adversarial_loss(validity, valid)
+        gen_imgs = gen_imgs.reshape(batch_size, set_size, -1)
+        g_loss_1 = 0
+        for j in range(batch_size):
+            g_loss_1 += mix_rbf_mmd2(gen_imgs[j].squeeze(0), real_imgs[j].squeeze(0), sigma_list = sigma_list)
         g_loss = g_loss_1 + opt.reg1 * ot_loss + opt.reg2 * loss_2
         gen_loss_total += g_loss_1.detach().cpu().numpy()
         ot_loss_total += ot_loss.detach().cpu().numpy()
         loss_2_total += loss_2.detach().cpu().numpy()
 
-        # g_loss.backward()
-        g_loss.backward(retain_graph=True)
+        g_loss.backward()
         optimizer_G.step()
-        # optimizer_E1.step()
-
-        # optimizer_E1.zero_grad()
-        # encodings = encoder1(real_imgs)
-
-        # ---------------------
-        #  Train Discriminator
-        # ---------------------
-        optimizer_D.zero_grad()
-
-        # Loss for real images
-        real_imgs = torch.reshape(real_imgs, (-1, *img_shape))
-        # validity_real = discriminator(real_imgs)
-        # validity_real = discriminator(real_imgs, labels)
-        validity_real = discriminator(real_imgs, encodings)
-        d_real_loss = adversarial_loss(validity_real, valid)
-
-        # Loss for fake images
-        # validity_fake = discriminator(gen_imgs.detach())
-        # validity_fake = discriminator(gen_imgs.detach(), gen_labels)
-        # validity_fake = discriminator(gen_imgs.detach(), labels)
-        validity_fake = discriminator(gen_imgs.detach(), encodings)
-        d_fake_loss = adversarial_loss(validity_fake, fake)
-
-        # Total discriminator loss
-        d_loss = (d_real_loss + d_fake_loss) / 2
-
-        d_loss.backward()
-        optimizer_D.step()
         optimizer_E1.step()
 
-        # diff = 0
-        # for j in range(batch_size):
-        #     for k in range(j+1,batch_size):
-        #         sink_dist = sinkhorn(imgs[j],imgs[k])
-        #         euc_dist = torch.norm(encodings[j]-encodings[k], p=2)
-        #         diff += torch.norm(sink_dist-euc_dist, p=2)
-
         print(
-            "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f] [OT loss: %f] [Loss 2: %f]"
-            % (epoch, opt.n_epochs, i, len(dataloader), d_loss.item(), g_loss.item(), ot_loss.item(), loss_2.item())
+            "[Epoch %d/%d] [Batch %d/%d] [G loss: %f] [OT loss: %f] [Loss 2: %f]"
+            % (epoch, opt.n_epochs, i, len(dataloader), g_loss.item(), ot_loss.item(), loss_2.item())
         )
 
         end = time.time()
         total += end - start
 
-        labels_old = labels
+        sink_dist = sinkhorn1(imgs[src],imgs[dest]).to("cuda")
+        sink_dist[src == dest] = 0
+        euc_dist = torch.norm(encodings[src]-encodings[dest], p=2, dim=1)
+        sink1.extend(sink_dist[src != dest].cpu().detach().numpy())
+        euc.extend(euc_dist[src != dest].cpu().detach().numpy())
 
-        # batches_done = epoch * len(dataloader) + i
-        # if batches_done % opt.sample_interval == 0:
-        #     # sample_image(n_row=10, batches_done=batches_done)
-        #     save_image(real_imgs.data, "real_images_%d_%d/%d.png" % (batch_size, set_size, batches_done), nrow=8, normalize=True)
-        #     save_image(gen_imgs.data, "gen_images_%d_%d/%d.png" % (batch_size, set_size, batches_done), nrow=8, normalize=True)
+        labels_old = labels
 
     gen.append(gen_loss_total)
     ot1.append(ot_loss_total)
@@ -383,55 +295,33 @@ for epoch in range(opt.n_epochs):
     total_time.append(total)
     print(total)
 
-    # pairs = []
-    # for i in range(batch_size):
-    #     for j in range(i+1, batch_size):
-    #         pairs.append(np.array([i,j]))
-    # pairs = np.stack(pairs)
-    # sink_dist = sinkhorn(imgs[pairs[:,0]],imgs[pairs[:,1]]).to("cuda")
-    # euc_dist = torch.norm(encodings[pairs[:,0]]-encodings[pairs[:,1]], p=2, dim=1)
-    # diff = torch.norm(sink_dist-euc_dist, p=2)
-    # diff = diff/(batch_size*(batch_size-1)/2)
-    # sink_dist = diff/(batch_size*(batch_size-1)/2)
+    corr, _ = pearsonr(sink1,euc)
+    print(corr)
+    dif1.append(corr)
 
-    # sink_dist1 = sinkhorn1(imgs[src],imgs[dest]).to("cuda")
-    # sink_dist1[src == dest] = 0
-    # # sink_dist2 = sinkhorn2(imgs[src],imgs[dest]).to("cuda")
-    # # sink_dist2[src == dest] = 0
-    # euc_dist = torch.norm(encodings[src]-encodings[dest], p=2, dim=1)
-    # corr1, _ = pearsonr(sink_dist1[src != dest].cpu().detach().numpy(), euc_dist[src != dest].cpu().detach().numpy())
-    # # corr2, _ = pearsonr(sink_dist2[src != dest].cpu().detach().numpy(), euc_dist[src != dest].cpu().detach().numpy())
-    # dif1.append(corr1)
-    # # dif2.append(corr2)
-
-    # diff = torch.norm(sink_dist-euc_dist, p=2)
-    # diff = diff/num_paths
-    # sink_dist = sink_dist.sum()/num_paths
-    # euc_dist = euc_dist.sum()/num_paths
-    # sink.append(sink_dist.detach().cpu().numpy())
-    # euc.append(euc_dist.detach().cpu().numpy())
-    # dif.append(diff.detach().cpu().numpy()/sink_dist.detach().cpu().numpy())
+    plt.figure()
+    plt.plot(total_time, dif1)
+    plt.savefig("corr_param/corr_%d.png" % epoch)
 
     # save_image(real_imgs.data, "real_images_%d_%d/%d_1.png" % (opt.batch_size, set_size, epoch), nrow=8, normalize=True)
     # save_image(gen_imgs.data, "gen_images_%d_%d/%d_1.png" % (opt.batch_size, set_size, epoch), nrow=8, normalize=True)
-    real_imgs = real_imgs.reshape(-1, opt.set_size, 1)
-    gen_imgs = gen_imgs.reshape(-1, opt.set_size, 1)
-    real_imgs_prv = real_imgs_prv.reshape(-1, opt.set_size, 1)
-    gen_imgs_prv = gen_imgs_prv.reshape(-1, opt.set_size, 1)
+    real_imgs_1 = real_imgs.reshape(-1, opt.set_size, 1)
+    gen_imgs_1 = gen_imgs.reshape(-1, opt.set_size, 1)
+    real_imgs_2 = real_imgs_prv.reshape(-1, opt.set_size, 1)
+    gen_imgs_2 = gen_imgs_prv.reshape(-1, opt.set_size, 1)
     plt.figure()
     plt.subplot(211)
-    plt.hist(real_imgs[0].cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='real0')
-    plt.hist(real_imgs_prv[0].detach().cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='real1')
+    plt.hist(real_imgs_1[0].cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='real0')
+    plt.hist(real_imgs_2[0].detach().cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='real1')
     plt.legend(loc='upper right')
     plt.subplot(212)
-    plt.hist(gen_imgs[0].detach().cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='generated0')
-    plt.hist(gen_imgs_prv[0].detach().cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='generated1')
+    plt.hist(gen_imgs_1[0].detach().cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='generated0')
+    plt.hist(gen_imgs_2[0].detach().cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='generated1')
     # gen_imgs_inter = generator(z, (0.5 * encodings_prv[:8] + 0.5 * encodings))
     # gen_imgs_inter = gen_imgs_inter.reshape(-1,opt.set_size,1)
     # plt.hist(gen_imgs_inter[0].detach().cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='generated_mid')
     for t in np.arange(0.25, 1.0, 0.25):
-        # gen_imgs_inter = generator(z, (t * encodings_prv[:8] + (1-t) * encodings))
-        gen_imgs_inter = generator(z, (t * encodings_prv + (1-t) * encodings))
+        gen_imgs_inter = generator(z, (t * encodings_prv[:batch_size] + (1-t) * encodings))
         gen_imgs_inter = gen_imgs_inter.reshape(-1,opt.set_size,1)
         plt.hist(gen_imgs_inter[0].detach().cpu().numpy(), alpha=0.5, bins=50, range=[-5.0, 5.0], label='generated_%.2f' % t)
     plt.legend(loc='upper right')
@@ -444,7 +334,7 @@ for epoch in range(opt.n_epochs):
     fig, axs = plt.subplots(3, gridspec_kw={'height_ratios': [1, 2, 1]}, sharex=True)
     plt.setp(axs, xlim=(-4,4))
 
-    axs[0].hist(gen_imgs_prv[0].detach().cpu().numpy(), alpha=0.5, bins=20)
+    axs[0].hist(gen_imgs_2[0].detach().cpu().numpy(), alpha=0.5, bins=20)
     axs[0].yaxis.set_visible(False)
 
     ids = np.random.randint(0, len(z), size=20)
@@ -458,7 +348,7 @@ for epoch in range(opt.n_epochs):
         axs[1].plot(x,T,'-',color='darkgrey')
     axs[1].set_ylabel("t")
 
-    axs[2].hist(gen_imgs[0].detach().cpu().numpy(), alpha=0.5, bins=20)
+    axs[2].hist(gen_imgs_1[0].detach().cpu().numpy(), alpha=0.5, bins=20)
     axs[2].set_xlabel("x")
     axs[2].yaxis.set_visible(False)
     fig.savefig("gen_param/traj_%d.png" % epoch)
@@ -478,8 +368,8 @@ for epoch in range(opt.n_epochs):
         for i, (imgs, labels) in enumerate(dataloader):
             real_imgs = Variable(imgs.type(FloatTensor))
             batch_size = real_imgs.shape[0]
-            encodings = encoder1(real_imgs)
-            X[start:start + batch_size] = encodings.detach().cpu().numpy()
+            encodings_full = encoder1(real_imgs)
+            X[start:start + batch_size] = encodings_full.detach().cpu().numpy()
             Y[start:start + batch_size] = labels.squeeze().numpy()
             start += batch_size
 
@@ -496,7 +386,7 @@ for epoch in range(opt.n_epochs):
         plt.savefig("tsne_param/test_%d.png" % epoch)
 
 plt.figure()
-plt.plot(gen, label="Generator Loss")
+plt.plot(np.log(gen), label="Generator Loss")
 plt.legend()
 plt.savefig("losses_param/gen_%d.png" % epoch)
 plt.figure()
