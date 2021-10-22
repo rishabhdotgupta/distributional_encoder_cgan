@@ -11,6 +11,9 @@ from matplotlib import pyplot as plt
 # from .settings import DATA_ROOT
 
 from IPython import embed
+import sciplex
+from pathlib import Path
+import re
 
 MNIST_TRANSFORM = Compose([ToTensor(), Normalize((0.1307,), (0.3081,))])
 
@@ -49,7 +52,6 @@ class MNISTSummation(Dataset):
             images1.append(img)
 
         return torch.stack(images1, dim=0), torch.LongTensor([target])
-
 
 class Parametric(Dataset):
     def __init__(self, set_size: int, train: bool = True, transform: Compose = None):
@@ -197,4 +199,69 @@ class Parametric(Dataset):
 
         x = self.data[index]
         target = self.targets[index]
+        return x, target
+
+class SciplexData(Dataset):
+    def __init__(self, set_size: int, num_sets: int, train: bool = True):
+
+        # set_dist = []
+        # targets = []
+        # label = 0
+
+        # for i in range(100):
+        #     x = torch.rand(set_size, 1)
+        #     set_dist.append(x)
+        #     targets.append(torch.LongTensor([label]))
+        # label += 1
+
+        # self.data = torch.stack(set_dist).float()
+        # self.targets = torch.stack(targets)
+
+        data_path = Path('/home/yavuz/data/sciplex')
+        sciplex2 = sciplex.SciPlex2(data_path / 'sciplex2', preprocess=True).dataset
+        self.conditions, set_values, self.treatments, self.doses = self.extract_sets_from_perturbations(sciplex2)
+        self.data, self.targets, self.sets, self.labels = self.sinkhorn_distances_among_sets(set_values, self.conditions, sample_size=set_size, sample_count=num_sets, projection='pca')
+
+    def extract_sets_from_perturbations(self, dataset, group_by:list=['perturbation_raw']):
+        set_labels = []
+        set_values = []
+        set_treatments = []
+        set_doses = []
+        for group, indices in dataset.obs.groupby(group_by).indices.items():
+            # embed()
+            # exit()
+            set_labels.append(group)
+            # split = re.split("[\b\W\b]+", group)[1:-1]
+            set_treatments.append(group.split(',')[0][2:-1])
+            set_doses.append(group.split(',')[1][2:-2])
+            # set_doses.append(float(group.split(',')[1][2:-2]))
+            set_values.append(dataset[indices])
+        return set_labels, set_values, set_treatments, set_doses
+
+    def sinkhorn_distances_among_sets(self, sets, labels, sample_size=None, sample_count=None, batch_size=1, backend='geomloss', projection='umap'):
+        if sample_size is not None and sample_count is not None:
+            result_sets = []
+            result_labels = []
+            targets = []
+            for set_idx, set in enumerate(sets):
+                for i in range(sample_count):
+                    random_idx = np.random.randint(len(sets), size=sample_size)
+                    result_sets.append(set[random_idx])
+                    result_labels.append(labels[set_idx])
+                    # targets.append(torch.LongTensor([set_idx]))
+                    targets.append(set_idx)
+            sets = result_sets
+            labels = result_labels
+
+        data = [torch.from_numpy(set.obsm[f'X_{projection}']) for set in sets]
+        return torch.stack(data), torch.LongTensor(targets), sets, labels
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, index: int) -> Tuple[FloatTensor, FloatTensor]:
+
+        x = self.data[index]
+        target = self.targets[index]
+        condition = self.labels[index]
         return x, target
